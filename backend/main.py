@@ -19,8 +19,12 @@ import hashlib
 import json as json_mod
 import urllib.parse
 import urllib.request
+import smtplib
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from typing import Optional
 
 import uvicorn
@@ -37,6 +41,8 @@ from slowapi.errors import RateLimitExceeded
 
 HMAC_SECRET      = os.environ.get("HMAC_SECRET", "dev-secret-change-in-production")
 RECAPTCHA_SECRET = os.environ.get("RECAPTCHA_SECRET", "")
+CLINIC_EMAIL     = os.environ.get("CLINIC_EMAIL",    "chosccpsocialhygiene@gmail.com")
+SMTP_PASSWORD    = os.environ.get("SMTP_PASSWORD",   "")
 ALLOWED_ORIGINS  = os.environ.get(
     "ALLOWED_ORIGINS",
     "https://h4sccp.github.io,http://127.0.0.1:5500,http://localhost:5500,http://127.0.0.1:9000",
@@ -254,6 +260,72 @@ def now_utc() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Email notification (sent to clinic inbox — patient stays anonymous)
+# ---------------------------------------------------------------------------
+
+def _send_email_sync(code: str, reason: str, appointment_iso: str) -> None:
+    if not SMTP_PASSWORD:
+        return
+    try:
+        dt  = datetime.fromisoformat(appointment_iso.replace("Z", "+00:00"))
+        day = dt.strftime("%A, %B %d, %Y")
+        tm  = dt.strftime("%I:%M %p")
+
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = f"New Anonymous Appointment — {day} at {tm}"
+        msg["From"]    = CLINIC_EMAIL
+        msg["To"]      = CLINIC_EMAIL
+
+        text = (
+            f"New anonymous appointment booked.\n\n"
+            f"Code   : {code}\n"
+            f"Date   : {day}\n"
+            f"Time   : {tm}\n"
+            f"Reason : {reason}\n\n"
+            f"Patient is anonymous. No personal information was collected.\n"
+            f"Verify this code at the Dashboard when the patient arrives."
+        )
+        html = f"""
+        <div style="font-family:sans-serif;max-width:480px;margin:0 auto;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">
+          <div style="background:#dc2626;padding:1rem 1.5rem;">
+            <h2 style="color:#fff;margin:0;font-size:1.1rem;">San Carlos City Social Hygiene Clinic</h2>
+            <p style="color:#fecaca;margin:4px 0 0;font-size:.85rem;">New Anonymous Appointment</p>
+          </div>
+          <div style="padding:1.5rem;">
+            <p style="margin:0 0 1rem;color:#374151;">A new appointment has been booked. The patient is <strong>fully anonymous</strong> — no personal information was collected.</p>
+            <table style="width:100%;border-collapse:collapse;font-size:.9rem;">
+              <tr><td style="padding:6px 12px;background:#f9fafb;font-weight:600;color:#6b7280;width:80px;">Code</td>
+                  <td style="padding:6px 12px;font-family:monospace;font-size:1rem;color:#dc2626;letter-spacing:2px;"><strong>{code}</strong></td></tr>
+              <tr><td style="padding:6px 12px;background:#f9fafb;font-weight:600;color:#6b7280;">Date</td>
+                  <td style="padding:6px 12px;">{day}</td></tr>
+              <tr><td style="padding:6px 12px;background:#f9fafb;font-weight:600;color:#6b7280;">Time</td>
+                  <td style="padding:6px 12px;">{tm}</td></tr>
+              <tr><td style="padding:6px 12px;background:#f9fafb;font-weight:600;color:#6b7280;">Reason</td>
+                  <td style="padding:6px 12px;">{reason}</td></tr>
+            </table>
+            <p style="margin:1.25rem 0 0;font-size:.8rem;color:#9ca3af;">Verify this code in the Dashboard when the patient arrives, then mark as Attended or No-show.</p>
+          </div>
+        </div>"""
+
+        msg.attach(MIMEText(text, "plain"))
+        msg.attach(MIMEText(html,  "html"))
+
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(CLINIC_EMAIL, SMTP_PASSWORD)
+            server.sendmail(CLINIC_EMAIL, CLINIC_EMAIL, msg.as_string())
+    except Exception:
+        pass  # never block a booking because email failed
+
+
+def send_appointment_email(code: str, reason: str, appointment_iso: str) -> None:
+    threading.Thread(
+        target=_send_email_sync,
+        args=(code, reason, appointment_iso),
+        daemon=True,
+    ).start()
+
+
+# ---------------------------------------------------------------------------
 # Routes — appointments
 # ---------------------------------------------------------------------------
 
@@ -277,7 +349,24 @@ def create_appointment(request: Request, data: AppointmentIn):
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Duplicate appointment — please try again.",
             )
+    send_appointment_email(code, data.reason, data.time)
     return {"success": True, "code": code}
+
+
+@app.post("/api/appointments/{code}/status")
+def update_appointment_status(code: str, body: dict):
+    """Staff endpoint: mark appointment as attended or no-show."""
+    new_status = (body.get("status") or "").strip().lower()
+    if new_status not in ("attended", "no-show", "pending", "cancelled"):
+        raise HTTPException(status_code=400, detail="Invalid status value.")
+    with get_db() as conn:
+        updated = conn.execute(
+            "UPDATE appointments SET status = ? WHERE code = ?",
+            (new_status, code.upper()),
+        ).rowcount
+    if not updated:
+        raise HTTPException(status_code=404, detail="Appointment not found.")
+    return {"success": True, "code": code.upper(), "status": new_status}
 
 
 @app.get("/api/appointments/upcoming")
