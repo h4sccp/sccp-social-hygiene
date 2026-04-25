@@ -243,43 +243,43 @@
                 <p class="text-gray-500 text-sm mb-4">Anonymous &amp; confidential — no personal information required.</p>
 
                 <form id="assessment-form" onsubmit="submitAssessmentForm(event)" novalidate>
-                    <fieldset>
-                        <legend class="text-gray-700 font-semibold mb-3">Select any symptoms or situations that apply to you:</legend>
+                    <div>
+                        <p class="text-gray-700 font-semibold mb-3">Select any symptoms or situations that apply to you:</p>
                         <div class="space-y-2">
                             <label class="flex items-start gap-2 cursor-pointer">
-                                <input type="checkbox" name="risk-factors" value="unprotected-sex" class="mt-1 accent-yellow-600">
+                                <input type="checkbox" name="risk-factors" value="unprotected-sex" class="mt-1 accent-yellow-600 cursor-pointer">
                                 <span class="text-gray-700 text-sm">Unprotected sexual contact in the past 3 months</span>
                             </label>
                             <label class="flex items-start gap-2 cursor-pointer">
-                                <input type="checkbox" name="risk-factors" value="multiple-partners" class="mt-1 accent-yellow-600">
+                                <input type="checkbox" name="risk-factors" value="multiple-partners" class="mt-1 accent-yellow-600 cursor-pointer">
                                 <span class="text-gray-700 text-sm">Multiple sexual partners</span>
                             </label>
                             <label class="flex items-start gap-2 cursor-pointer">
-                                <input type="checkbox" name="risk-factors" value="sti-history" class="mt-1 accent-yellow-600">
+                                <input type="checkbox" name="risk-factors" value="sti-history" class="mt-1 accent-yellow-600 cursor-pointer">
                                 <span class="text-gray-700 text-sm">Previous diagnosis of an STI</span>
                             </label>
                             <label class="flex items-start gap-2 cursor-pointer">
-                                <input type="checkbox" name="risk-factors" value="partner-sti" class="mt-1 accent-yellow-600">
+                                <input type="checkbox" name="risk-factors" value="partner-sti" class="mt-1 accent-yellow-600 cursor-pointer">
                                 <span class="text-gray-700 text-sm">Partner has or may have an STI</span>
                             </label>
                             <label class="flex items-start gap-2 cursor-pointer">
-                                <input type="checkbox" name="risk-factors" value="discharge-or-sores" class="mt-1 accent-yellow-600">
+                                <input type="checkbox" name="risk-factors" value="discharge-or-sores" class="mt-1 accent-yellow-600 cursor-pointer">
                                 <span class="text-gray-700 text-sm">Unusual discharge, sores, rash, or pain in genital area</span>
                             </label>
                             <label class="flex items-start gap-2 cursor-pointer">
-                                <input type="checkbox" name="risk-factors" value="shared-needles" class="mt-1 accent-yellow-600">
+                                <input type="checkbox" name="risk-factors" value="shared-needles" class="mt-1 accent-yellow-600 cursor-pointer">
                                 <span class="text-gray-700 text-sm">Shared needles or injecting equipment</span>
                             </label>
                             <label class="flex items-start gap-2 cursor-pointer">
-                                <input type="checkbox" name="risk-factors" value="no-recent-test" class="mt-1 accent-yellow-600">
+                                <input type="checkbox" name="risk-factors" value="no-recent-test" class="mt-1 accent-yellow-600 cursor-pointer">
                                 <span class="text-gray-700 text-sm">Never tested or no testing in the past 12 months</span>
                             </label>
                             <label class="flex items-start gap-2 cursor-pointer">
-                                <input type="checkbox" name="risk-factors" value="fever-fatigue" class="mt-1 accent-yellow-600">
+                                <input type="checkbox" name="risk-factors" value="fever-fatigue" class="mt-1 accent-yellow-600 cursor-pointer">
                                 <span class="text-gray-700 text-sm">Persistent fever, fatigue, or unexplained weight loss</span>
                             </label>
                         </div>
-                    </fieldset>
+                    </div>
 
                     <p id="assessment-error" class="hidden text-red-500 text-sm mt-3">Please select at least one option to get a recommendation.</p>
 
