@@ -17,6 +17,8 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css" />
     <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+    <!-- reCAPTCHA v3 — uncomment and replace YOUR_SITE_KEY after registering at g.co/recaptcha -->
+    <!-- <script src="https://www.google.com/recaptcha/api.js?render=YOUR_SITE_KEY"></script> -->
 
     <style>
         body { font-family: 'Inter', sans-serif; background-color: #f0f4f8; margin: 0; }
@@ -91,6 +93,9 @@
         .appt-table td { padding: 10px 12px; border-bottom: 1px solid #f1f5f9; vertical-align: top; }
         .appt-table tr:last-child td { border-bottom: none; }
         .appt-table tr:hover td { background: #f8fafc; }
+
+        /* Printable ticket — hidden on screen, shown only when window.print() is called from the ticket popup */
+        .ticket-code { font-family: monospace; font-size: 1.3rem; font-weight: 700; letter-spacing: 3px; color: #dc2626; background: #fef2f2; padding: 0.6rem 1rem; border-radius: 6px; display: inline-block; margin: 0.5rem 0; }
     </style>
 </head>
 
@@ -321,6 +326,11 @@
                 </form>
 
                 <div id="appointment-message" class="hidden mt-4 p-3 rounded-lg text-sm font-medium" role="alert"></div>
+                <div id="appointment-ticket" class="hidden mt-3">
+                    <button onclick="printTicket()" class="px-5 py-2 bg-green-700 text-white rounded-full text-sm font-semibold hover:bg-green-800 transition duration-300">
+                        ⬇ Download / Print Appointment Slip
+                    </button>
+                </div>
             </div>
 
         </div>
@@ -449,6 +459,19 @@
             Dashboard
         </h2>
 
+        <!-- Staff: verify appointment code -->
+        <div class="bg-white border border-gray-200 rounded-lg p-4 mb-6 shadow-sm">
+            <h3 class="text-lg font-semibold text-gray-700 mb-1">Verify Appointment Code</h3>
+            <p class="text-gray-500 text-sm mb-3">Staff only — type in the patient's code to confirm it is genuine and not expired.</p>
+            <div class="flex gap-2">
+                <input id="verify-input" type="text" placeholder="e.g. SCC-682196D0-A3F2B891"
+                    class="flex-1 border rounded px-3 py-2 text-sm font-mono text-gray-700 focus:outline-none focus:ring-2 focus:ring-teal-400 uppercase"
+                    oninput="this.value=this.value.toUpperCase()">
+                <button onclick="verifyCode()" class="px-5 py-2 bg-teal-600 text-white rounded-full text-sm font-semibold hover:bg-teal-700 transition duration-300">Verify</button>
+            </div>
+            <div id="verify-result" class="hidden mt-3 p-3 rounded-lg text-sm font-medium" role="alert"></div>
+        </div>
+
         <!-- loading / error states -->
         <div id="dashboard-loading" class="text-center py-12 text-gray-400">Loading dashboard…</div>
         <div id="dashboard-error" class="hidden text-center py-8 text-red-500 bg-red-50 rounded-lg">
@@ -570,7 +593,10 @@
 <!-- ═══════════════════════ SCRIPTS ═══════════════════════ -->
 <script>
 // ── CONFIG ──────────────────────────────────────────────────────────
-const BASE_URL = "https://sccp-social-hygiene.onrender.com"; // change to your deployed URL
+const BASE_URL = "https://sccp-social-hygiene.onrender.com";
+// After registering at g.co/recaptcha, paste your v3 SITE KEY here and
+// uncomment the <script> tag in <head> that loads the reCAPTCHA library.
+const RECAPTCHA_SITE_KEY = "";
 
 // ── HELPERS ─────────────────────────────────────────────────────────
 
@@ -608,6 +634,16 @@ function showMsg(el, text, isError) {
 function hideAfter(el, ms = 12000) {
     setTimeout(() => el.classList.add("hidden"), ms);
 }
+
+async function getRecaptchaToken(action) {
+    if (!RECAPTCHA_SITE_KEY || typeof grecaptcha === "undefined") return "";
+    return new Promise(resolve => {
+        grecaptcha.ready(() => grecaptcha.execute(RECAPTCHA_SITE_KEY, { action }).then(resolve));
+    });
+}
+
+// stores the last booked appointment so printTicket() can use it
+let _lastTicket = null;
 
 // ── NAVIGATION ──────────────────────────────────────────────────────
 
@@ -698,8 +734,10 @@ async function submitAppointmentForm(e) {
     const reasonEl = document.getElementById("appointment-reason");
     const msgEl    = document.getElementById("appointment-message");
     const errEl    = document.getElementById("appointment-reason-error");
+    const ticketEl = document.getElementById("appointment-ticket");
 
     errEl.classList.add("hidden");
+    ticketEl.classList.add("hidden");
 
     const date   = dateEl.value;
     const time   = timeEl.value;
@@ -714,15 +752,20 @@ async function submitAppointmentForm(e) {
     showMsg(msgEl, "Processing your request…", false);
 
     try {
-        const code    = generateCode("SCC");
+        const recaptcha_token = await getRecaptchaToken("appointment");
         const isoTime = new Date(`${date}T${time}:00`).toISOString();
 
-        await apiPost("/api/appointments", { code, reason, time: isoTime });
+        const result = await apiPost("/api/appointments", { reason, time: isoTime, recaptcha_token });
+        const code   = result.code;
+
+        _lastTicket = { code, date, time, reason };
 
         showMsg(msgEl,
-            `Appointment booked for ${date} at ${time}.\nYour anonymous code: ${code}\nPresent this code at the clinic.`,
+            `Appointment booked for ${date} at ${time}.\nYour anonymous code: ${code}\nPresent this code at the clinic. Keep it safe!`,
             false
         );
+        ticketEl.classList.remove("hidden");
+
         e.target.reset();
         document.getElementById("appointment-time").innerHTML = '<option value="">Pick a date first</option>';
         document.getElementById("appointment-time").disabled = true;
@@ -731,7 +774,82 @@ async function submitAppointmentForm(e) {
         showMsg(msgEl, `Could not book appointment: ${err.message}. Please try again or call the clinic.`, true);
     }
 
-    hideAfter(msgEl, 15000);
+    hideAfter(msgEl, 30000);
+}
+
+function printTicket() {
+    if (!_lastTicket) return;
+    const { code, date, time, reason } = _lastTicket;
+    const win = window.open("", "_blank", "width=520,height=480");
+    win.document.write(`<!DOCTYPE html><html><head><title>Appointment Slip — San Carlos City SHC</title>
+<style>
+  body{font-family:sans-serif;padding:2rem;background:#f9fafb;}
+  .ticket{border:2px solid #dc2626;border-radius:10px;padding:1.5rem;max-width:420px;margin:0 auto;background:#fff;}
+  h2{color:#dc2626;text-align:center;margin:0 0 4px;}
+  .sub{text-align:center;color:#6b7280;font-size:.85rem;margin-bottom:1rem;}
+  .code-box{background:#fef2f2;border:1px dashed #dc2626;border-radius:6px;padding:.75rem 1rem;text-align:center;margin:.75rem 0;}
+  .code{font-family:monospace;font-size:1.4rem;font-weight:700;letter-spacing:3px;color:#dc2626;}
+  .row{margin:.4rem 0;font-size:.9rem;color:#374151;}
+  .label{font-weight:600;color:#6b7280;font-size:.75rem;text-transform:uppercase;display:block;}
+  .note{font-size:.75rem;color:#9ca3af;margin-top:1rem;border-top:1px solid #f3f4f6;padding-top:.75rem;line-height:1.6;}
+  @media print{body{padding:.5rem;}button{display:none!important;}}
+</style></head><body>
+<div class="ticket">
+  <h2>San Carlos City</h2>
+  <p class="sub">Social Hygiene Clinic — Anonymous Appointment Slip</p>
+  <div class="code-box"><div class="code">${escHtmlBasic(code)}</div></div>
+  <div class="row"><span class="label">Date</span>${escHtmlBasic(date)}</div>
+  <div class="row"><span class="label">Time</span>${escHtmlBasic(time)}</div>
+  <div class="row"><span class="label">Reason</span>${escHtmlBasic(reason)}</div>
+  <div class="note">
+    Present this slip at the clinic. No name required.<br>
+    This code is valid until <strong>15 minutes after</strong> your appointment time.<br>
+    Keep it confidential — do not share with others.
+  </div>
+</div>
+<br><button onclick="window.print()" style="display:block;margin:1rem auto;padding:.5rem 1.5rem;background:#dc2626;color:#fff;border:none;border-radius:999px;cursor:pointer;font-size:.9rem;">Print / Save as PDF</button>
+</body></html>`);
+    win.document.close();
+}
+
+function escHtmlBasic(str) {
+    return String(str).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
+}
+
+// ── CODE VERIFICATION (staff) ────────────────────────────────────────
+
+async function verifyCode() {
+    const code     = document.getElementById("verify-input").value.trim().toUpperCase();
+    const resultEl = document.getElementById("verify-result");
+    if (!code) return;
+
+    resultEl.className = "mt-3 p-3 rounded-lg text-sm font-medium bg-gray-50 text-gray-600";
+    resultEl.textContent = "Checking…";
+    resultEl.classList.remove("hidden");
+
+    try {
+        const data = await apiGet(`/api/verify/${encodeURIComponent(code)}`);
+
+        if (!data.valid) {
+            resultEl.className = "mt-3 p-3 rounded-lg text-sm font-medium bg-red-50 text-red-700";
+            resultEl.textContent = `✗ ${data.message}`;
+        } else if (data.expired) {
+            const dt  = new Date(data.appointment_time);
+            const dts = dt.toLocaleDateString("en-PH", { weekday:"short", month:"short", day:"numeric", year:"numeric" });
+            const tms = dt.toLocaleTimeString("en-PH", { hour:"2-digit", minute:"2-digit" });
+            resultEl.className = "mt-3 p-3 rounded-lg text-sm font-medium bg-yellow-50 text-yellow-700";
+            resultEl.textContent = `⚠ Expired — ${data.reason} scheduled ${dts} at ${tms}. More than 15 min past appointment time.`;
+        } else {
+            const dt  = new Date(data.appointment_time);
+            const dts = dt.toLocaleDateString("en-PH", { weekday:"short", month:"short", day:"numeric", year:"numeric" });
+            const tms = dt.toLocaleTimeString("en-PH", { hour:"2-digit", minute:"2-digit" });
+            resultEl.className = "mt-3 p-3 rounded-lg text-sm font-medium bg-green-50 text-green-700";
+            resultEl.textContent = `✓ Valid — ${data.reason} on ${dts} at ${tms}.`;
+        }
+    } catch {
+        resultEl.className = "mt-3 p-3 rounded-lg text-sm font-medium bg-red-50 text-red-700";
+        resultEl.textContent = "Could not verify — check your connection.";
+    }
 }
 
 // ── ASSESSMENT FORM ──────────────────────────────────────────────────

@@ -1,7 +1,11 @@
 """
 San Carlos City Social Hygiene Clinic — Backend API
-Runs on http://127.0.0.1:9000
 Storage: SQLite (clinic.db, auto-created on first run)
+
+Environment variables (set in Render → Environment):
+  HMAC_SECRET       — secret key for signing appointment codes (required in production)
+  RECAPTCHA_SECRET  — Google reCAPTCHA v3 secret key (optional; skip verification if unset)
+  ALLOWED_ORIGINS   — comma-separated allowed origins (defaults to GitHub Pages + localhost)
 
 Start:  python main.py
         OR uvicorn main:app --host 0.0.0.0 --port 9000 --reload
@@ -10,30 +14,60 @@ Docs:   http://127.0.0.1:9000/docs
 
 import sqlite3
 import os
+import hmac as hmac_mod
+import hashlib
+import json as json_mod
+import urllib.parse
+import urllib.request
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 # ---------------------------------------------------------------------------
-# App + CORS
+# Config
+# ---------------------------------------------------------------------------
+
+HMAC_SECRET      = os.environ.get("HMAC_SECRET", "dev-secret-change-in-production")
+RECAPTCHA_SECRET = os.environ.get("RECAPTCHA_SECRET", "")
+ALLOWED_ORIGINS  = os.environ.get(
+    "ALLOWED_ORIGINS",
+    "https://h4sccp.github.io,http://127.0.0.1:5500,http://localhost:5500,http://127.0.0.1:9000",
+).split(",")
+
+# ---------------------------------------------------------------------------
+# Rate limiter  (IP-aware, reads X-Forwarded-For from Render's proxy)
+# ---------------------------------------------------------------------------
+
+def _real_ip(request: Request) -> str:
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    return forwarded.split(",")[0].strip() if forwarded else (request.client.host or "unknown")
+
+limiter = Limiter(key_func=_real_ip)
+
+# ---------------------------------------------------------------------------
+# App
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
     title="San Carlos City Social Hygiene Clinic API",
-    version="1.0.0",
+    version="2.0.0",
     description="Anonymous scheduling, symptoms self-assessment, and dashboard.",
 )
 
-# Allow the static frontend (served from any origin in dev).
-# In production narrow this to your actual domain, e.g. ["https://yourdomain.gov.ph"]
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type"],
 )
@@ -49,7 +83,7 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "clinic.db")
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")   # safe for concurrent reads
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     try:
         yield conn
@@ -93,13 +127,79 @@ def init_db() -> None:
 
 
 # ---------------------------------------------------------------------------
+# HMAC-signed appointment codes
+# ---------------------------------------------------------------------------
+
+def make_code(appointment_iso: str) -> str:
+    """Generate a signed code that embeds the appointment timestamp.
+
+    Format: SCC-{unix_timestamp_hex}-{hmac_8chars}
+    Example: SCC-682196D0-A3F2B891
+    """
+    dt     = datetime.fromisoformat(appointment_iso.replace("Z", "+00:00"))
+    ts_hex = format(int(dt.timestamp()), "X")
+    sig    = hmac_mod.new(
+        HMAC_SECRET.encode(), ts_hex.encode(), hashlib.sha256
+    ).hexdigest()[:8].upper()
+    return f"SCC-{ts_hex}-{sig}"
+
+
+def check_code(code: str) -> dict:
+    """Verify a code's HMAC and return validity + expiry info."""
+    parts = code.upper().strip().split("-")
+    if len(parts) != 3 or parts[0] != "SCC":
+        return {"valid": False}
+    ts_hex, sig = parts[1], parts[2]
+    try:
+        expected = hmac_mod.new(
+            HMAC_SECRET.encode(), ts_hex.encode(), hashlib.sha256
+        ).hexdigest()[:8].upper()
+    except Exception:
+        return {"valid": False}
+    if not hmac_mod.compare_digest(sig, expected):
+        return {"valid": False}
+    try:
+        appt_ts = int(ts_hex, 16)
+        appt_dt = datetime.fromtimestamp(appt_ts, tz=timezone.utc)
+    except (ValueError, OverflowError):
+        return {"valid": False}
+    now = datetime.now(timezone.utc)
+    return {
+        "valid":            True,
+        "expired":          now > appt_dt + timedelta(minutes=15),
+        "appointment_time": appt_dt.isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# reCAPTCHA v3 verification
+# ---------------------------------------------------------------------------
+
+def verify_recaptcha(token: str) -> bool:
+    """Returns True if the token is valid (or if reCAPTCHA is not configured)."""
+    if not RECAPTCHA_SECRET or not token:
+        return True
+    try:
+        data = urllib.parse.urlencode(
+            {"secret": RECAPTCHA_SECRET, "response": token}
+        ).encode()
+        with urllib.request.urlopen(
+            "https://www.google.com/recaptcha/api/siteverify", data, timeout=5
+        ) as resp:
+            result = json_mod.loads(resp.read())
+        return bool(result.get("success")) and float(result.get("score", 0)) >= 0.5
+    except Exception:
+        return True  # don't block real users if Google is unreachable
+
+
+# ---------------------------------------------------------------------------
 # Request / response schemas
 # ---------------------------------------------------------------------------
 
 class AppointmentIn(BaseModel):
-    code: str
-    reason: str
-    time: str   # ISO-8601 string sent by the browser
+    reason:          str
+    time:            str            # ISO-8601 string sent by the browser
+    recaptcha_token: Optional[str] = None
 
     @field_validator("reason")
     @classmethod
@@ -120,8 +220,8 @@ class AppointmentIn(BaseModel):
 
 
 class AssessmentIn(BaseModel):
-    score: int          # number of risk factors selected
-    notes: str          # comma-separated factor labels
+    score: int
+    notes: str
 
     @field_validator("score")
     @classmethod
@@ -132,9 +232,9 @@ class AssessmentIn(BaseModel):
 
 
 class EventRegistrationIn(BaseModel):
-    code: str
-    name: str
-    event: str
+    code:    str
+    name:    str
+    event:   str
     contact: Optional[str] = ""
 
 
@@ -143,12 +243,9 @@ class EventRegistrationIn(BaseModel):
 # ---------------------------------------------------------------------------
 
 def classify_risk(score: int) -> str:
-    if score == 0:
-        return "none"
-    if score <= 2:
-        return "low"
-    if score <= 4:
-        return "medium"
+    if score == 0:   return "none"
+    if score <= 2:   return "low"
+    if score <= 4:   return "medium"
     return "high"
 
 
@@ -161,24 +258,30 @@ def now_utc() -> str:
 # ---------------------------------------------------------------------------
 
 @app.post("/api/appointments", status_code=status.HTTP_201_CREATED)
-def create_appointment(data: AppointmentIn):
+@limiter.limit("3/day")
+def create_appointment(request: Request, data: AppointmentIn):
+    if not verify_recaptcha(data.recaptcha_token or ""):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Bot check failed. Please try again.",
+        )
+    code = make_code(data.time)
     with get_db() as conn:
         try:
             conn.execute(
                 "INSERT INTO appointments (code, reason, appointment_time) VALUES (?, ?, ?)",
-                (data.code, data.reason, data.time),
+                (code, data.reason, data.time),
             )
         except sqlite3.IntegrityError:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Duplicate appointment code — please try again.",
+                detail="Duplicate appointment — please try again.",
             )
-    return {"success": True, "code": data.code}
+    return {"success": True, "code": code}
 
 
 @app.get("/api/appointments/upcoming")
 def upcoming_appointments(limit: int = 10):
-    """Public list of upcoming appointments (code + reason only — no PII)."""
     with get_db() as conn:
         rows = conn.execute(
             """
@@ -194,12 +297,52 @@ def upcoming_appointments(limit: int = 10):
     return {"appointments": [dict(r) for r in rows]}
 
 
+@app.get("/api/verify/{code}")
+def verify_appointment_code(code: str):
+    """Staff endpoint: verify that a patient's code is genuine and not expired."""
+    result = check_code(code)
+    if not result["valid"]:
+        return {"valid": False, "message": "Invalid code. This was not issued by the clinic."}
+
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT reason, appointment_time, status FROM appointments WHERE code = ?",
+            (code.upper(),),
+        ).fetchone()
+
+    if not row:
+        return {"valid": False, "message": "Code not found in records."}
+
+    if row["status"] == "cancelled":
+        return {"valid": False, "message": "This appointment was cancelled."}
+
+    if result["expired"]:
+        return {
+            "valid":            True,
+            "expired":          True,
+            "reason":           row["reason"],
+            "appointment_time": row["appointment_time"],
+            "status":           row["status"],
+            "message":          "Code is valid but expired (more than 15 minutes past appointment time).",
+        }
+
+    return {
+        "valid":            True,
+        "expired":          False,
+        "reason":           row["reason"],
+        "appointment_time": row["appointment_time"],
+        "status":           row["status"],
+        "message":          "Valid appointment code.",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Routes — self-assessment
 # ---------------------------------------------------------------------------
 
 @app.post("/api/assessments", status_code=status.HTTP_201_CREATED)
-def create_assessment(data: AssessmentIn):
+@limiter.limit("10/hour")
+def create_assessment(request: Request, data: AssessmentIn):
     risk_level = classify_risk(data.score)
     with get_db() as conn:
         conn.execute(
@@ -235,35 +378,23 @@ def create_event_registration(data: EventRegistrationIn):
 
 @app.get("/api/dashboard")
 def get_dashboard():
-    """Aggregated stats + next 5 upcoming appointments for the dashboard."""
     with get_db() as conn:
         now = now_utc()
 
-        total_appts = conn.execute(
-            "SELECT COUNT(*) FROM appointments"
-        ).fetchone()[0]
-
+        total_appts    = conn.execute("SELECT COUNT(*) FROM appointments").fetchone()[0]
         upcoming_count = conn.execute(
             "SELECT COUNT(*) FROM appointments WHERE appointment_time >= ? AND status != 'cancelled'",
             (now,),
         ).fetchone()[0]
-
-        total_assessments = conn.execute(
-            "SELECT COUNT(*) FROM assessments"
-        ).fetchone()[0]
-
-        risk_counts = {
+        total_assess   = conn.execute("SELECT COUNT(*) FROM assessments").fetchone()[0]
+        risk_counts    = {
             row["risk_level"]: row["n"]
             for row in conn.execute(
                 "SELECT risk_level, COUNT(*) AS n FROM assessments GROUP BY risk_level"
             ).fetchall()
         }
-
-        total_events = conn.execute(
-            "SELECT COUNT(*) FROM event_registrations"
-        ).fetchone()[0]
-
-        upcoming_rows = conn.execute(
+        total_events   = conn.execute("SELECT COUNT(*) FROM event_registrations").fetchone()[0]
+        upcoming_rows  = conn.execute(
             """
             SELECT code, reason, appointment_time, status
             FROM   appointments
@@ -279,7 +410,7 @@ def get_dashboard():
         "stats": {
             "total_appointments":        total_appts,
             "upcoming_appointments":     upcoming_count,
-            "total_assessments":         total_assessments,
+            "total_assessments":         total_assess,
             "risk_distribution":         risk_counts,
             "total_event_registrations": total_events,
         },
