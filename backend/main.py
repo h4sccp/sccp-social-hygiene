@@ -28,7 +28,7 @@ from email.mime.multipart import MIMEMultipart
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -39,10 +39,11 @@ from slowapi.errors import RateLimitExceeded
 # Config
 # ---------------------------------------------------------------------------
 
-HMAC_SECRET      = os.environ.get("HMAC_SECRET", "dev-secret-change-in-production")
-RECAPTCHA_SECRET = os.environ.get("RECAPTCHA_SECRET", "")
+HMAC_SECRET      = os.environ.get("HMAC_SECRET",     "dev-secret-change-in-production")
+RECAPTCHA_SECRET = os.environ.get("RECAPTCHA_SECRET","")
 CLINIC_EMAIL     = os.environ.get("CLINIC_EMAIL",    "chosccpsocialhygiene@gmail.com")
 SMTP_PASSWORD    = os.environ.get("SMTP_PASSWORD",   "")
+STAFF_PASSWORD   = os.environ.get("STAFF_PASSWORD",  "changeme")
 ALLOWED_ORIGINS  = os.environ.get(
     "ALLOWED_ORIGINS",
     "https://h4sccp.github.io,http://127.0.0.1:5500,http://localhost:5500,http://127.0.0.1:9000",
@@ -260,6 +261,30 @@ def now_utc() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Staff authentication — simple HMAC token valid for 1 hour
+# ---------------------------------------------------------------------------
+
+def _make_staff_token() -> str:
+    hour = datetime.now(timezone.utc).strftime("%Y%m%d%H")
+    return hmac_mod.new(HMAC_SECRET.encode(), f"staff:{hour}".encode(), hashlib.sha256).hexdigest()
+
+
+def _verify_staff_token(token: str) -> bool:
+    now = datetime.now(timezone.utc)
+    for delta in range(2):  # accept current hour and previous hour
+        hour     = (now - timedelta(hours=delta)).strftime("%Y%m%d%H")
+        expected = hmac_mod.new(HMAC_SECRET.encode(), f"staff:{hour}".encode(), hashlib.sha256).hexdigest()
+        if hmac_mod.compare_digest(token or "", expected):
+            return True
+    return False
+
+
+def require_staff(x_staff_token: str = Header(default="")):
+    if not _verify_staff_token(x_staff_token):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Staff authentication required.")
+
+
+# ---------------------------------------------------------------------------
 # Email notification (sent to clinic inbox — patient stays anonymous)
 # ---------------------------------------------------------------------------
 
@@ -353,8 +378,17 @@ def create_appointment(request: Request, data: AppointmentIn):
     return {"success": True, "code": code}
 
 
+@app.post("/api/staff/token")
+@limiter.limit("10/hour")
+def staff_login(request: Request, body: dict):
+    """Returns a 1-hour staff token if the password is correct."""
+    if not hmac_mod.compare_digest(body.get("password", ""), STAFF_PASSWORD):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect password.")
+    return {"token": _make_staff_token()}
+
+
 @app.post("/api/appointments/{code}/status")
-def update_appointment_status(code: str, body: dict):
+def update_appointment_status(code: str, body: dict, _: None = Depends(require_staff)):
     """Staff endpoint: mark appointment as attended or no-show."""
     new_status = (body.get("status") or "").strip().lower()
     if new_status not in ("attended", "no-show", "pending", "cancelled"):
@@ -387,7 +421,7 @@ def upcoming_appointments(limit: int = 10):
 
 
 @app.get("/api/verify/{code}")
-def verify_appointment_code(code: str):
+def verify_appointment_code(code: str, _: None = Depends(require_staff)):
     """Staff endpoint: verify that a patient's code is genuine and not expired."""
     result = check_code(code)
     if not result["valid"]:
@@ -466,7 +500,7 @@ def create_event_registration(data: EventRegistrationIn):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/dashboard")
-def get_dashboard():
+def get_dashboard(_: None = Depends(require_staff)):
     with get_db() as conn:
         now = now_utc()
 

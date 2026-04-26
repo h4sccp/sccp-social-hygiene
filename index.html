@@ -552,6 +552,22 @@
         </div>
     </section>
 
+    <!-- STAFF LOGIN OVERLAY -->
+    <div id="staff-login-overlay" class="hidden fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
+        <div class="bg-white rounded-lg shadow-xl p-6 max-w-sm w-full mx-4">
+            <h3 class="text-lg font-bold text-gray-800 mb-1">Staff Access Only</h3>
+            <p class="text-gray-500 text-sm mb-4">Enter the staff password to view the dashboard.</p>
+            <input type="password" id="staff-password" placeholder="Staff password"
+                class="w-full border rounded px-3 py-2 text-gray-700 mb-3 focus:outline-none focus:ring-2 focus:ring-teal-400"
+                onkeydown="if(event.key==='Enter') staffLogin()">
+            <div id="staff-login-error" class="hidden text-red-600 text-sm mb-3">Incorrect password. Please try again.</div>
+            <div class="flex gap-2">
+                <button onclick="staffLogin()" class="flex-1 px-4 py-2 bg-teal-600 text-white rounded-full font-semibold hover:bg-teal-700 transition duration-300">Enter</button>
+                <button onclick="closeStaffLogin()" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-full font-semibold hover:bg-gray-300 transition duration-300">Cancel</button>
+            </div>
+        </div>
+    </div>
+
     <!-- EVENT REGISTRATION MODAL -->
     <div id="proud-positive-modal" class="modal" aria-hidden="true">
         <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="modal-title">
@@ -648,6 +664,62 @@ async function getRecaptchaToken(action) {
 // stores the last booked appointment so printTicket() can use it
 let _lastTicket = null;
 
+// ── STAFF AUTH ───────────────────────────────────────────────────────
+
+function staffToken() {
+    return sessionStorage.getItem("staff_token") || "";
+}
+
+function staffHeaders() {
+    const t = staffToken();
+    return t ? { "Content-Type": "application/json", "X-Staff-Token": t } : { "Content-Type": "application/json" };
+}
+
+async function apiGetStaff(path) {
+    const res = await fetch(`${BASE_URL}${path}`, { headers: { "X-Staff-Token": staffToken() } });
+    if (res.status === 401) { sessionStorage.removeItem("staff_token"); showStaffLogin(); throw new Error("auth"); }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+}
+
+async function apiPostStaff(path, data) {
+    const res = await fetch(`${BASE_URL}${path}`, {
+        method: "POST",
+        headers: staffHeaders(),
+        body: JSON.stringify(data || {}),
+    });
+    if (res.status === 401) { sessionStorage.removeItem("staff_token"); showStaffLogin(); throw new Error("auth"); }
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.detail || `HTTP ${res.status}`); }
+    return res.json();
+}
+
+function showStaffLogin() {
+    document.getElementById("staff-login-error").classList.add("hidden");
+    document.getElementById("staff-password").value = "";
+    document.getElementById("staff-login-overlay").classList.remove("hidden");
+    setTimeout(() => document.getElementById("staff-password").focus(), 50);
+}
+
+function closeStaffLogin() {
+    document.getElementById("staff-login-overlay").classList.add("hidden");
+}
+
+async function staffLogin() {
+    const pw  = document.getElementById("staff-password").value;
+    const err = document.getElementById("staff-login-error");
+    err.classList.add("hidden");
+    try {
+        const res = await apiPost("/api/staff/token", { password: pw });
+        sessionStorage.setItem("staff_token", res.token);
+        closeStaffLogin();
+        showSection("dashboard");
+    } catch {
+        err.classList.remove("hidden");
+        document.getElementById("staff-password").value = "";
+        document.getElementById("staff-password").focus();
+    }
+}
+
 // ── NAVIGATION ──────────────────────────────────────────────────────
 
 function showSection(id) {
@@ -669,8 +741,11 @@ function showSection(id) {
     const link = document.querySelector(`.nav-link[onclick="showSection('${id}')"]`);
     if (link) link.classList.add("active");
 
-    // auto-load dashboard when navigating to it
-    if (id === "dashboard") loadDashboard();
+    // dashboard requires staff login
+    if (id === "dashboard") {
+        if (!staffToken()) { showStaffLogin(); return; }
+        loadDashboard();
+    }
 }
 
 // ── MODALS ──────────────────────────────────────────────────────────
@@ -837,7 +912,7 @@ async function verifyCode() {
     resultEl.classList.remove("hidden");
 
     try {
-        const data = await apiGet(`/api/verify/${encodeURIComponent(code)}`);
+        const data = await apiGetStaff(`/api/verify/${encodeURIComponent(code)}`);
 
         if (!data.valid) {
             resultEl.className   = "mt-3 p-3 rounded-lg text-sm font-medium bg-red-50 text-red-700";
@@ -875,7 +950,7 @@ async function markStatus(newStatus) {
     const actionsEl = document.getElementById("verify-actions");
 
     try {
-        await apiPost(`/api/appointments/${encodeURIComponent(_lastVerifiedCode)}/status`, { status: newStatus });
+        await apiPostStaff(`/api/appointments/${encodeURIComponent(_lastVerifiedCode)}/status`, { status: newStatus });
         const label = newStatus === "attended" ? "Attended ✓" : "No-show ✗";
         resultEl.className   = newStatus === "attended"
             ? "mt-3 p-3 rounded-lg text-sm font-medium bg-green-50 text-green-700"
@@ -985,7 +1060,7 @@ async function loadDashboard() {
     content.classList.add("hidden");
 
     try {
-        const data = await apiGet("/api/dashboard");
+        const data = await apiGetStaff("/api/dashboard");
         renderDashboard(data);
         loading.classList.add("hidden");
         content.classList.remove("hidden");
