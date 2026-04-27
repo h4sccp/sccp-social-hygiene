@@ -130,7 +130,6 @@
                 <li><a href="#" onclick="showSection('campaigns')" class="nav-link hover:text-white transition duration-300">Pride and Positive Campaign</a></li>
                 <li><a href="#" onclick="showSection('directory')" class="nav-link hover:text-white transition duration-300">Treatment Hubs</a></li>
                 <li><a href="#" onclick="showSection('resources')" class="nav-link hover:text-white transition duration-300">Resources</a></li>
-                <li><a href="#" onclick="showSection('dashboard')" class="nav-link hover:text-white transition duration-300">Dashboard</a></li>
                 <li><a href="#" onclick="showSection('contact-us')" class="nav-link hover:text-white transition duration-300">Contact Us</a></li>
             </ul>
         </nav>
@@ -553,16 +552,21 @@
     </section>
 
     <!-- STAFF LOGIN OVERLAY -->
-    <div id="staff-login-overlay" class="hidden fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
-        <div class="bg-white rounded-lg shadow-xl p-6 max-w-sm w-full mx-4">
-            <h3 class="text-lg font-bold text-gray-800 mb-1">Staff Access Only</h3>
-            <p class="text-gray-500 text-sm mb-4">Enter the staff password to view the dashboard.</p>
-            <input type="password" id="staff-password" placeholder="Staff password"
-                class="w-full border rounded px-3 py-2 text-gray-700 mb-3 focus:outline-none focus:ring-2 focus:ring-teal-400"
+    <div id="staff-login-overlay" class="hidden fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50">
+        <div class="bg-white rounded-lg shadow-xl p-6 max-w-sm w-full mx-4 border-t-4 border-red-600">
+            <div class="flex items-center gap-2 mb-1">
+                <svg class="w-5 h-5 text-red-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m0 0v2m0-2h2m-2 0H10m2-11a4 4 0 014 4v1H8v-1a4 4 0 014-4z"/><rect x="3" y="11" width="18" height="11" rx="2" stroke-width="2"/></svg>
+                <h3 class="text-lg font-bold text-gray-800">Authorized Staff Only</h3>
+            </div>
+            <p class="text-gray-500 text-xs mb-1">This area is restricted to San Carlos City Social Hygiene Clinic personnel.</p>
+            <p class="text-red-500 text-xs mb-4 font-medium">Unauthorized access attempts are logged.</p>
+            <input type="password" id="staff-password" placeholder="Enter staff password"
+                class="w-full border rounded px-3 py-2 text-gray-700 mb-2 focus:outline-none focus:ring-2 focus:ring-red-400"
                 onkeydown="if(event.key==='Enter') staffLogin()">
-            <div id="staff-login-error" class="hidden text-red-600 text-sm mb-3">Incorrect password. Please try again.</div>
+            <div id="staff-login-error"  class="hidden text-red-600 text-xs mb-2"></div>
+            <div id="staff-login-locked" class="hidden text-orange-600 text-xs mb-2 font-medium"></div>
             <div class="flex gap-2">
-                <button onclick="staffLogin()" class="flex-1 px-4 py-2 bg-teal-600 text-white rounded-full font-semibold hover:bg-teal-700 transition duration-300">Enter</button>
+                <button id="staff-login-btn" onclick="staffLogin()" class="flex-1 px-4 py-2 bg-red-600 text-white rounded-full font-semibold hover:bg-red-700 transition duration-300">Enter</button>
                 <button onclick="closeStaffLogin()" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-full font-semibold hover:bg-gray-300 transition duration-300">Cancel</button>
             </div>
         </div>
@@ -606,6 +610,7 @@
     <div class="container mx-auto">
         <p>&copy; 2025 San Carlos City Social Hygiene Clinic. All rights reserved.</p>
         <p class="text-sm mt-2">Proud and Positive: Promoting Health, Embracing All. Follow us on <a href="https://www.facebook.com/sccp.cho" target="_blank" rel="noopener noreferrer" class="text-blue-300 hover:underline">Facebook</a>.</p>
+        <p class="mt-4"><a href="#" onclick="showSection('dashboard')" class="text-gray-600 text-xs hover:text-gray-400 transition duration-300">Staff</a></p>
     </div>
 </footer>
 
@@ -693,11 +698,45 @@ async function apiPostStaff(path, data) {
     return res.json();
 }
 
+const LOCKOUT_LIMIT   = 3;
+const LOCKOUT_MINUTES = 10;
+
+function _getAttempts() {
+    try { return JSON.parse(sessionStorage.getItem("staff_attempts") || "{}"); } catch { return {}; }
+}
+function _saveAttempts(obj) { sessionStorage.setItem("staff_attempts", JSON.stringify(obj)); }
+
+function _isLocked() {
+    const a = _getAttempts();
+    if ((a.count || 0) < LOCKOUT_LIMIT) return false;
+    const elapsed = (Date.now() - (a.since || 0)) / 60000;
+    if (elapsed >= LOCKOUT_MINUTES) { _saveAttempts({}); return false; }
+    return Math.ceil(LOCKOUT_MINUTES - elapsed);
+}
+
 function showStaffLogin() {
     document.getElementById("staff-login-error").classList.add("hidden");
+    document.getElementById("staff-login-locked").classList.add("hidden");
     document.getElementById("staff-password").value = "";
     document.getElementById("staff-login-overlay").classList.remove("hidden");
-    setTimeout(() => document.getElementById("staff-password").focus(), 50);
+
+    const mins = _isLocked();
+    if (mins) {
+        _applyLockUI(mins);
+    } else {
+        setTimeout(() => document.getElementById("staff-password").focus(), 50);
+    }
+}
+
+function _applyLockUI(minsLeft) {
+    const lockedEl = document.getElementById("staff-login-locked");
+    const btn      = document.getElementById("staff-login-btn");
+    const inp      = document.getElementById("staff-password");
+    lockedEl.textContent = `Too many incorrect attempts. Try again in ${minsLeft} minute${minsLeft > 1 ? "s" : ""}.`;
+    lockedEl.classList.remove("hidden");
+    btn.disabled  = true;
+    inp.disabled  = true;
+    btn.classList.add("opacity-50", "cursor-not-allowed");
 }
 
 function closeStaffLogin() {
@@ -705,18 +744,34 @@ function closeStaffLogin() {
 }
 
 async function staffLogin() {
-    const pw  = document.getElementById("staff-password").value;
-    const err = document.getElementById("staff-login-error");
-    err.classList.add("hidden");
+    const mins = _isLocked();
+    if (mins) { _applyLockUI(mins); return; }
+
+    const pw     = document.getElementById("staff-password").value;
+    const errEl  = document.getElementById("staff-login-error");
+    errEl.classList.add("hidden");
+
     try {
         const res = await apiPost("/api/staff/token", { password: pw });
         sessionStorage.setItem("staff_token", res.token);
+        _saveAttempts({});
         closeStaffLogin();
         showSection("dashboard");
     } catch {
-        err.classList.remove("hidden");
-        document.getElementById("staff-password").value = "";
-        document.getElementById("staff-password").focus();
+        const a     = _getAttempts();
+        const count = (a.count || 0) + 1;
+        _saveAttempts({ count, since: a.since || Date.now() });
+
+        const remaining = LOCKOUT_LIMIT - count;
+        if (remaining <= 0) {
+            _saveAttempts({ count, since: Date.now() });
+            _applyLockUI(LOCKOUT_MINUTES);
+        } else {
+            errEl.textContent = `Incorrect password. ${remaining} attempt${remaining > 1 ? "s" : ""} remaining before lockout.`;
+            errEl.classList.remove("hidden");
+            document.getElementById("staff-password").value = "";
+            document.getElementById("staff-password").focus();
+        }
     }
 }
 
