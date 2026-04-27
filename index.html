@@ -95,6 +95,9 @@
 
         /* Printable ticket — hidden on screen, shown only when window.print() is called from the ticket popup */
         .ticket-code { font-family: monospace; font-size: 1.3rem; font-weight: 700; letter-spacing: 3px; color: #dc2626; background: #fef2f2; padding: 0.6rem 1rem; border-radius: 6px; display: inline-block; margin: 0.5rem 0; }
+
+        /* Filter buttons */
+        .filter-btn.active { background: #0f766e; color: white; border-color: #0f766e; }
     </style>
 </head>
 
@@ -509,14 +512,26 @@
                 <div id="dash-risk-bars" class="space-y-3"></div>
             </div>
 
-            <!-- Upcoming appointments table -->
+            <!-- All appointments with filter -->
             <div class="bg-gray-50 p-4 md:p-6 rounded-lg shadow-md">
-                <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-xl font-semibold text-gray-700">Upcoming Appointments</h3>
-                    <button onclick="loadDashboard()" class="text-sm text-teal-700 hover:underline font-medium">Refresh</button>
+                <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+                    <h3 class="text-xl font-semibold text-gray-700">Appointments</h3>
+                    <button onclick="loadAppointments(_currentFilter)" class="text-sm text-teal-700 hover:underline font-medium">Refresh</button>
                 </div>
+
+                <div class="flex flex-wrap gap-2 mb-4" id="dash-filters">
+                    <button data-filter="today"    onclick="setFilter('today')"    class="filter-btn px-3 py-1 rounded-full text-xs font-semibold border border-gray-300 hover:bg-gray-100 transition">Today</button>
+                    <button data-filter="upcoming" onclick="setFilter('upcoming')" class="filter-btn px-3 py-1 rounded-full text-xs font-semibold border border-gray-300 hover:bg-gray-100 transition">Upcoming</button>
+                    <button data-filter="pending"  onclick="setFilter('pending')"  class="filter-btn px-3 py-1 rounded-full text-xs font-semibold border border-gray-300 hover:bg-gray-100 transition">Pending</button>
+                    <button data-filter="attended" onclick="setFilter('attended')" class="filter-btn px-3 py-1 rounded-full text-xs font-semibold border border-gray-300 hover:bg-gray-100 transition">Attended</button>
+                    <button data-filter="no-show"  onclick="setFilter('no-show')"  class="filter-btn px-3 py-1 rounded-full text-xs font-semibold border border-gray-300 hover:bg-gray-100 transition">No-show</button>
+                    <button data-filter="past"     onclick="setFilter('past')"     class="filter-btn px-3 py-1 rounded-full text-xs font-semibold border border-gray-300 hover:bg-gray-100 transition">Past</button>
+                    <button data-filter="all"      onclick="setFilter('all')"      class="filter-btn px-3 py-1 rounded-full text-xs font-semibold border border-gray-300 hover:bg-gray-100 transition">All</button>
+                </div>
+
+                <div id="dash-appt-count" class="text-xs text-gray-500 mb-2"></div>
                 <div id="dash-appt-table-wrap">
-                    <p class="text-gray-400 text-sm">No upcoming appointments.</p>
+                    <p class="text-gray-400 text-sm">Pick a filter above to view appointments.</p>
                 </div>
             </div>
 
@@ -1105,6 +1120,8 @@ const RISK_COLORS = {
     high:   { bar: "bg-red-500",    badge: "risk-high"   },
 };
 
+let _currentFilter = "today";
+
 async function loadDashboard() {
     const loading = document.getElementById("dashboard-loading");
     const errDiv  = document.getElementById("dashboard-error");
@@ -1119,9 +1136,84 @@ async function loadDashboard() {
         renderDashboard(data);
         loading.classList.add("hidden");
         content.classList.remove("hidden");
+        setFilter(_currentFilter);
     } catch {
         loading.classList.add("hidden");
         errDiv.classList.remove("hidden");
+    }
+}
+
+function setFilter(name) {
+    _currentFilter = name;
+    document.querySelectorAll(".filter-btn").forEach(b => {
+        b.classList.toggle("active", b.dataset.filter === name);
+    });
+    loadAppointments(name);
+}
+
+async function loadAppointments(filter) {
+    const wrap    = document.getElementById("dash-appt-table-wrap");
+    const countEl = document.getElementById("dash-appt-count");
+    wrap.innerHTML = '<p class="text-gray-400 text-sm">Loading…</p>';
+    countEl.textContent = "";
+    try {
+        const data = await apiGetStaff(`/api/appointments/list?filter=${encodeURIComponent(filter)}`);
+        renderAppointmentsTable(data.appointments || []);
+        countEl.textContent = `${data.count} appointment${data.count === 1 ? "" : "s"}`;
+    } catch {
+        wrap.innerHTML = '<p class="text-red-500 text-sm">Could not load appointments.</p>';
+    }
+}
+
+function renderAppointmentsTable(appts) {
+    const wrap = document.getElementById("dash-appt-table-wrap");
+    if (!appts.length) {
+        wrap.innerHTML = '<p class="text-gray-400 text-sm">No appointments match this filter.</p>';
+        return;
+    }
+    const now = Date.now();
+    const rows = appts.map(a => {
+        const dt    = new Date(a.appointment_time);
+        const day   = dt.toLocaleDateString("en-PH", { weekday:"short", year:"numeric", month:"short", day:"numeric" });
+        const tm    = dt.toLocaleTimeString("en-PH", { hour:"2-digit", minute:"2-digit" });
+        const past  = dt.getTime() < now;
+        const expired = past && (now - dt.getTime()) > 15 * 60 * 1000;
+        const isPending = a.status === "pending" || a.status === "confirmed";
+
+        const actions = isPending
+            ? `<div class="flex gap-1 flex-wrap">
+                 <button onclick="quickMark('${escHtml(a.code)}','attended')" class="px-2 py-1 bg-green-600 text-white rounded text-xs hover:bg-green-700">Attended</button>
+                 <button onclick="quickMark('${escHtml(a.code)}','no-show')"  class="px-2 py-1 bg-gray-500  text-white rounded text-xs hover:bg-gray-600">No-show</button>
+               </div>`
+            : '<span class="text-gray-400 text-xs">—</span>';
+
+        const expiredBadge = expired && isPending ? '<span class="ml-1 text-xs text-orange-600">(expired)</span>' : "";
+
+        return `<tr>
+            <td class="font-mono text-xs text-gray-500">${escHtml(a.code)}</td>
+            <td>${escHtml(a.reason)}</td>
+            <td class="whitespace-nowrap text-xs">${day}<br>${tm}${expiredBadge}</td>
+            <td><span class="risk-badge ${statusColor(a.status)}">${escHtml(a.status)}</span></td>
+            <td>${actions}</td>
+        </tr>`;
+    }).join("");
+
+    wrap.innerHTML = `
+    <div class="overflow-x-auto">
+        <table class="appt-table">
+            <thead><tr><th>Code</th><th>Reason</th><th>When</th><th>Status</th><th>Action</th></tr></thead>
+            <tbody>${rows}</tbody>
+        </table>
+    </div>`;
+}
+
+async function quickMark(code, newStatus) {
+    try {
+        await apiPostStaff(`/api/appointments/${encodeURIComponent(code)}/status`, { status: newStatus });
+        loadAppointments(_currentFilter);
+        loadDashboard();
+    } catch (err) {
+        alert(`Could not update status: ${err.message}`);
     }
 }
 
@@ -1159,43 +1251,7 @@ function renderDashboard(data) {
         }).join("");
     }
 
-    // upcoming appointments table
-    const wrap = document.getElementById("dash-appt-table-wrap");
-    if (!appts || appts.length === 0) {
-        wrap.innerHTML = '<p class="text-gray-400 text-sm">No upcoming appointments.</p>';
-        return;
-    }
-
-    const rows = appts.map(a => {
-        const dt  = new Date(a.appointment_time);
-        const day = dt.toLocaleDateString("en-PH", { weekday:"short", year:"numeric", month:"short", day:"numeric" });
-        const tm  = dt.toLocaleTimeString("en-PH", { hour:"2-digit", minute:"2-digit" });
-        const c   = RISK_COLORS["none"]; // appointments don't have risk levels
-        return `
-        <tr>
-            <td class="font-mono text-xs text-gray-500">${escHtml(a.code)}</td>
-            <td>${escHtml(a.reason)}</td>
-            <td class="whitespace-nowrap">${day}</td>
-            <td class="whitespace-nowrap">${tm}</td>
-            <td><span class="risk-badge ${statusColor(a.status)}">${escHtml(a.status)}</span></td>
-        </tr>`;
-    }).join("");
-
-    wrap.innerHTML = `
-    <div class="overflow-x-auto">
-        <table class="appt-table">
-            <thead>
-                <tr>
-                    <th>Code</th>
-                    <th>Reason</th>
-                    <th>Date</th>
-                    <th>Time</th>
-                    <th>Status</th>
-                </tr>
-            </thead>
-            <tbody>${rows}</tbody>
-        </table>
-    </div>`;
+    // appointment table is now rendered separately by loadAppointments() based on the active filter
 }
 
 function statusColor(s) {

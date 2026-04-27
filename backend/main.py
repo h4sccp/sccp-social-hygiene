@@ -403,6 +403,39 @@ def update_appointment_status(code: str, body: dict, _: None = Depends(require_s
     return {"success": True, "code": code.upper(), "status": new_status}
 
 
+@app.get("/api/appointments/list")
+def list_appointments(filter: str = "all", _: None = Depends(require_staff)):
+    """Staff endpoint: list all appointments with filtering.
+    filter: today | upcoming | past | pending | attended | no-show | all
+    """
+    now = now_utc()
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    today_end   = datetime.now(timezone.utc).replace(hour=23, minute=59, second=59, microsecond=0).isoformat()
+
+    queries = {
+        "today":    ("appointment_time >= ? AND appointment_time <= ?", (today_start, today_end)),
+        "upcoming": ("appointment_time >= ? AND status NOT IN ('cancelled','attended','no-show')", (now,)),
+        "past":     ("appointment_time < ?", (now,)),
+        "pending":  ("status = 'pending'", ()),
+        "attended": ("status = 'attended'", ()),
+        "no-show":  ("status = 'no-show'", ()),
+        "all":      ("1=1", ()),
+    }
+    where, params = queries.get(filter, queries["all"])
+    with get_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT code, reason, appointment_time, status, created_at
+            FROM   appointments
+            WHERE  {where}
+            ORDER  BY appointment_time DESC
+            LIMIT  200
+            """,
+            params,
+        ).fetchall()
+    return {"appointments": [dict(r) for r in rows], "filter": filter, "count": len(rows)}
+
+
 @app.get("/api/appointments/upcoming")
 def upcoming_appointments(limit: int = 10):
     with get_db() as conn:
