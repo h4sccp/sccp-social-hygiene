@@ -2,3 +2,5 @@ backend/clinic.db
 backend/__pycache__/
 *.pyc
 .env
+.claude/
+lab-reports/

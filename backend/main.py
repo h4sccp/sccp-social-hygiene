@@ -60,13 +60,18 @@ def _real_ip(request: Request) -> str:
 limiter = Limiter(key_func=_real_ip)
 
 # ---------------------------------------------------------------------------
-# App
+# App  (docs disabled in production to reduce attack surface)
 # ---------------------------------------------------------------------------
+
+IS_DEV = os.environ.get("RENDER") is None   # Render sets RENDER=true automatically
 
 app = FastAPI(
     title="San Carlos City Social Hygiene Clinic API",
     version="2.0.0",
     description="Anonymous scheduling, symptoms self-assessment, and dashboard.",
+    docs_url    = "/docs"    if IS_DEV else None,
+    redoc_url   = "/redoc"   if IS_DEV else None,
+    openapi_url = "/openapi.json" if IS_DEV else None,
 )
 
 app.state.limiter = limiter
@@ -78,6 +83,37 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type"],
 )
+
+# ---------------------------------------------------------------------------
+# Security headers — applied to every response
+# ---------------------------------------------------------------------------
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"]    = "nosniff"
+    response.headers["X-Frame-Options"]           = "DENY"
+    response.headers["Referrer-Policy"]           = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"]        = "geolocation=(), microphone=(), camera=()"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
+# ---------------------------------------------------------------------------
+# Request body size limit — rejects payloads over 16 KB
+# ---------------------------------------------------------------------------
+
+MAX_BODY_BYTES = 16_384   # 16 KB — more than enough for any form submission
+
+@app.middleware("http")
+async def limit_body_size(request: Request, call_next):
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > MAX_BODY_BYTES:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=413,
+            content={"detail": "Request body too large."},
+        )
+    return await call_next(request)
 
 # ---------------------------------------------------------------------------
 # Database helpers
